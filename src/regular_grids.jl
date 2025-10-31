@@ -3,7 +3,7 @@ using SparseArrays
 using LinearSolve
 
 
-struct FlowModel{G<:PlanarRegularGrid, P, BC}
+struct FlowModel{G<:PlanarRegularGrid, P, BC, SCT}
     grid::G
     
     # Hydraulic properties (K, porosity, etc.)
@@ -15,7 +15,7 @@ struct FlowModel{G<:PlanarRegularGrid, P, BC}
     conditions::BC
     
     # Configuration for the solver
-    solver_config::SomeSolverConfigType # e.g., (algorithm=KrylovJL_CG(), abstol=1e-6)
+    solver_config::SCT # e.g., (algorithm=KrylovJL_CG(), abstol=1e-6)
 end
 
 struct FlowSolution{

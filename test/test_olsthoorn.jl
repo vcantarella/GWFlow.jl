@@ -1,7 +1,7 @@
 using Test
 using LinearAlgebra
 using SparseArrays
-using KernelAbstractions
+import KernelAbstractions as KA
 using LinearSolve
 
 # --- Import your packages ---
@@ -121,28 +121,27 @@ function run_gwflow_solver(backend)
     delc = 25.0
     top = 0.0
     # Create layer thicknesses
-    layer_thicknesses = fill(20.0, nlay)
+    layer_thickness = 20.0
     
     grid = PlanarRegularGrid(
-        nlay, nrow, ncol;
-        delr = delr,
-        delc = delc,
-        top = top,
-        layer_thicknesses = layer_thicknesses,
-        origin = (-1000.0, -1000.0), # From x[1] and y[1]
-        angrot = 0.0
-    )
+            nlay, nrow, ncol,
+            delr, delc, 
+            layer_thickness,
+            top,
+            origin=(-1000.0, -1000.0),
+            angrot=0.0
+        )
 
     # --- 2. Properties ---
     k_val = 10.0
     T = Float64
     
-    k_horiz_arr = KA.fill(backend, T(k_val), nlay, nrow, ncol)
-    k_vert_arr = KA.fill(backend, T(k_val), nlay, nrow, ncol)
-    
+    k_horiz_arr = fill(T(k_val), (nlay, nrow, ncol))
+    k_vert_arr = fill(T(k_val), (nlay, nrow, ncol))
+
     # Apply inactive zone by setting K=0
     # Note: `KA.zeros` is the right way to do this
-    inactive_patch = KA.zeros(backend, T, nlay, 5, 50)
+    inactive_patch = zeros(T, nlay, 5, 50)
     k_horiz_arr[:, 41:45, 21:70] = inactive_patch
     k_vert_arr[:, 41:45, 21:70] = inactive_patch
     
@@ -155,21 +154,22 @@ function run_gwflow_solver(backend)
     
     # Fixed Head (last row, head=0.0)
     chb_locs = [(l, nrow, c) for l in 1:nlay, c in 1:ncol]
-    chb = ConstantHeadBC(grid, vec(chb_locs), T(0.0))
+    chb = GWFlow.ConstantHeadBC(grid, vec(chb_locs), T(0.0))
     
     # Well (Flux)
-    well = Well(grid, 3, 31, 26, T(-1200.0))
+    well = GWFlow.Well(grid, 3, 31, 26, T(-1200.0))
     
     conditions = (
         fixed_head_N = chb,
         extraction_well = well
     )
+    solver_config = (algorithm=KrylovJL_CG(), abstol=1e-6)
 
     # --- 4. Create Model ---
-    model = FlowModel(grid, properties, conditions)
+    model = GWFlow.FlowModel(grid, properties, conditions, solver_config)
     
     # --- 5. Build and Solve System ---
-    (A, b, chb_indices) = build_system(model, backend)
+    (A, b, chb_indices) = GWFlow.build_system(model, backend)
     
     prob = LinearProblem(A, b)
     sol = solve(prob) # Use default sparse CPU solver
@@ -186,7 +186,7 @@ end
     
     # --- Run both solvers ---
     phi_ref, active_nodes, fxhd_nodes, inact_nodes = run_reference_solver()
-    phi_gwflow = run_gwflow_solver(CPU())
+    phi_gwflow = run_gwflow_solver(KA.CPU())
     
     Nod = length(phi_ref)
     

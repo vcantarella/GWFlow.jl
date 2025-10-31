@@ -1,7 +1,7 @@
-using GWSolve
+using GWFlow
 using Test
 
-@testset "GWSolve Tests" begin
+@testset "GWFlow Tests" begin
     @testset "solve" begin
         include("test_olsthoorn.jl")
     end

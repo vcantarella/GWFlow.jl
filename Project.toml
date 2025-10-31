@@ -1,3 +1,8 @@
+name = "GWFlow"
+uuid = "22efd11f-bb18-4515-8f54-ecdfd643f231"
+version = "0.1.0"
+authors = ["vcantarella <vcantarella@gmail.com>"]
+
 [deps]
 Atomix = "a9b6321e-bd34-4604-b9c9-b65b8de01458"
 GWGrids = "d33f57a8-936b-4b85-ac63-7cab154bb436"
@@ -5,3 +10,7 @@ KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 LinearSolve = "7ed4a6bd-45f5-4d41-b270-4a48e9bafcae"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[compat]
+Test = "1.11.0"

@@ -1,6 +1,21 @@
 # This kernel would live in your solver.jl
 using KernelAbstractions
 using Atomix
+using GWGrids
+
+@inline function _get_deltaz(grid::PlanarRegularGrid, l::Int)
+    if l == 1 # Top layer
+        return grid.top - grid.botm[l]
+    else
+        return grid.botm[l-1] - grid.botm[l]
+    end
+end
+
+# TODO: get condunctance between two cells
+@inline function _get_conductance(K1, L1, K2, L2, Area)
+    return error("Not implemented")
+end
+
 @kernel function compute_conductances_kernel!(Cx, Cy, Cz, grid, k_horiz, k_vert)
     l, r, c = @index(Global, NTuple)
     nlay, nrow, ncol = grid.nlay, grid.nrow, grid.ncol
@@ -8,7 +23,7 @@ using Atomix
     # Get cell dimensions
     delr_c = grid.delr[c]
     delc_r = grid.delc[r]
-    deltaz_l = _get_deltaz(grid, l) # Assuming _get_deltaz is GPU-safe
+    deltaz_l = _get_deltaz(grid, l)
 
     # --- X-direction Conductance ---
     if c < ncol
@@ -203,13 +218,24 @@ function build_system(model::FlowModel{<:PlanarRegularGrid}, backend)
     nlay, nrow, ncol = grid.nlay, grid.nrow, grid.ncol
     n_nodes = nlay * nrow * ncol
     T = eltype(grid.delr)
+
+    # Get one of the arrays from the model (e.g., k_horiz)
+    # This is our "source of truth" for the device and type
+    props_array = model.properties.k_horiz
+
+    # Get the backend (e.g., CPU() or CUDABackend()) from the array
+    backend = KernelAbstractions.get_backend(props_array)
+    
+    # Get the element type (e.g., Float64) from the array
+    T = eltype(props_array)
     
     # --- 1. Allocate Backend Arrays ---
-    Cx = KA.zeros(backend, T, nlay, nrow, ncol)
-    Cy = KA.zeros(backend, T, nlay, nrow, ncol)
-    Cz = KA.zeros(backend, T, nlay, nrow, ncol)
-    A_diag = KA.zeros(backend, T, n_nodes)
-    b = KA.zeros(backend, T, n_nodes) # This `b` will be modified by kernels
+    Cx = similar(props_array, T, (nlay, nrow, ncol)); Cx .= zero(T)
+    Cy = similar(props_array, T, (nlay, nrow, ncol)); Cy .= zero(T)
+    Cz = similar(props_array, T, (nlay, nrow, ncol)); Cz .= zero(T)
+    A_diag = similar(props_array, T, n_nodes); A_diag .= zero(T)
+    b = similar(props_array, T, n_nodes); b .= zero(T)
+    
     
     # --- 2. Launch Kernels ---
     k1 = compute_conductances_kernel!(backend)(

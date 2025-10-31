@@ -1,4 +1,3 @@
-
 # --- 1. ABSTRACT TYPE ---
 abstract type BoundaryCondition{T<:AbstractFloat} end
 
@@ -89,27 +88,25 @@ function _to_linear_indices(
     locations::AbstractVector{<:Tuple{Int, Int, Int}}
 )
     n_nodes = length(locations)
-    
-    # Get the correct array type (Vector or CuArray) from the grid
-    ArrayType = typeof(grid.delr)
-    
-    # Create the output array (e.g., Vector{Int} or CuArray{Int})
-    indices_vec = similar(ArrayType, Int, n_nodes)
-    
-    # This part must run on the CPU as it iterates over a (possibly) CPU-based list
-    cpu_locations = locations
-    if !(locations isa Vector)
-         cpu_locations = Array(locations) # Bring locations to CPU for iteration
-    end
-    
-    indices_cpu = zeros(Int, n_nodes)
+    n_nodes = length(locations)
+
+    # Create an output container with the same device/container type as grid.delr
+    # but with element type Int and length n_nodes. Using the grid's array as
+    # a prototype ensures CPU/GPU compatibility (e.g., Vector vs CuArray).
+    indices_vec = similar(grid.delr, Int, n_nodes)
+
+    # Ensure we iterate over a CPU-side Vector of location tuples
+    cpu_locations = locations isa Vector ? locations : collect(locations)
+
+    # Compute indices on the CPU
+    indices_cpu = Vector{Int}(undef, n_nodes)
     for (i, (l, r, c)) in enumerate(cpu_locations)
         indices_cpu[i] = _to_linear_index(grid, l, r, c)
     end
-    
-    # Copy the indices back to the original device (e.g., GPU)
-    indices_vec = ArrayType(indices_cpu)
-    
+
+    # Copy values into the output container (works for CPU->CPU or CPU->GPU)
+    copy!(indices_vec, indices_cpu)
+
     return indices_vec
 end
 
@@ -158,17 +155,16 @@ function Well(
     # 1. Get the single linear index
     idx = _to_linear_index(grid, l, r, c)
     
-    # 2. Get the grid's array type
-    ArrayType = typeof(grid.delr)
-    
-    # 3. Create a 1-element vector on the correct device
-    indices_vec = similar(ArrayType, Int, 1)
+    # 2. Create a 1-element index container with same device/type as grid.delr
+    indices_vec = similar(grid.delr, Int, 1)
     indices_vec[1] = idx
-    # A more direct (but maybe less GPU-friendly) way:
-    # indices_vec = ArrayType([idx])
-    
-    # 4. Return the generic FluxBC struct
-    return FluxBC(indices_vec, T(Q))
+
+    # 3. Prepare the flux value on the correct device/type
+    flux_val = _prepare_bc_data(grid, Q)
+
+    # 4. Return the generic FluxBC struct with explicit type parameters
+    FT = eltype(flux_val)
+    return FluxBC{FT, typeof(indices_vec), typeof(flux_val)}(indices_vec, flux_val)
 end
 
 function Well(grid::PlanarRegularGrid, location::Tuple{Int, Int, Int}, Q::Real)
@@ -227,8 +223,10 @@ function ConstantHeadBC(
     # 2. Prepare head data (move to GPU if needed)
     head_data = _prepare_bc_data(grid, head)
 
+    T = eltype(head_data)
+
     # 3. Return the generic ConstantHeadBC struct
-    return ConstantHeadBC(indices_vec, head_data)
+    return ConstantHeadBC{T, typeof(indices_vec), typeof(head_data)}(indices_vec, head_data)
 end
 
 
