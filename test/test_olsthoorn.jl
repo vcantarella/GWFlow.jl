@@ -1,0 +1,214 @@
+using Test
+using LinearAlgebra
+using SparseArrays
+using KernelAbstractions
+using LinearSolve
+
+# --- Import your packages ---
+# (You must make sure GWGrids.jl and GroundwaterFlow.jl are
+# available in your Julia environment)
+using GWGrids
+using GWFlow
+
+
+
+# ====================================================================
+#  STEP 1: THE REFERENCE SOLVER
+#  (This is the script you provided, wrapped in a function)
+# ====================================================================
+
+function run_reference_solver()
+    @info "Running reference 'plain Julia' solver..."
+
+    # Specify a rectangular grid
+    x = -1000.0:25.0:1000.0
+    y = -1000.0:25.0:1000.0
+    z = -100.0:20.0:0.0
+
+    # Get number of cells along each axis
+    Nx = length(x) - 1
+    Ny = length(y) - 1
+    Nz = length(z) - 1
+
+    sz = (Nz, Ny, Nx)
+    Nod = prod(sz)
+
+    # Cell dimensions
+    dx = reshape(diff(x), 1, 1, Nx)
+    dy = reshape(diff(y), 1, Ny, 1)
+    dz = reshape(abs.(diff(z)), Nz, 1, 1)
+
+    # IBOUND array
+    IBOUND = ones(Int, sz)
+    IBOUND[:, end, :] .= -1      # Last row has prescribed heads
+    IBOUND[:, 41:45, 21:70] .= 0 # Inactive cells
+
+    active = reshape(IBOUND .> 0, Nod)
+    inact = reshape(IBOUND .== 0, Nod)
+    fxhd = reshape(IBOUND .< 0, Nod)
+
+    # Hydraulic conductivities
+    k = 10.0
+    kx = k * ones(sz)
+    ky = k * ones(sz)
+    kz = k * ones(sz)
+
+    # Half cell flow resistances
+    Rx = 0.5 * dx ./ (dy .* dz) ./ kx
+    Ry = 0.5 * dy ./ (dz .* dx) ./ ky
+    Rz = 0.5 * dz ./ (dx .* dy) ./ kz
+
+    # Set inactive resistances
+    Rx_flat = reshape(Rx, Nod); Rx_flat[inact] .= Inf; Rx = reshape(Rx_flat, sz)
+    Ry_flat = reshape(Ry, Nod); Ry_flat[inact] .= Inf; Ry = reshape(Ry_flat, sz)
+    Rz_flat = reshape(Rz, Nod); Rz_flat[inact] .= Inf; Rz = reshape(Rz_flat, sz)
+
+    # Conductances
+    Cx = 1 ./ (Rx[:, :, 1:end-1] .+ Rx[:, :, 2:end])
+    Cy = 1 ./ (Ry[:, 1:end-1, :] .+ Ry[:, 2:end, :])
+    Cz = 1 ./ (Rz[1:end-1, :, :] .+ Rz[2:end, :, :])
+
+    # Node numbering (0-indexed)
+    NOD = reshape(0:Nod-1, sz)
+
+    # Neighbor identification (0-indexed)
+    IE = NOD[:, :, 2:end]; IW = NOD[:, :, 1:end-1]
+    IN = NOD[:, 1:end-1, :]; IS = NOD[:, 2:end, :]
+    IT = NOD[1:end-1, :, :]; IB = NOD[2:end, :, :]
+
+    # Build sparse system matrix (1-indexed)
+    row_indices = vcat(vec(IE), vec(IW), vec(IN), vec(IS), vec(IB), vec(IT)) .+ 1
+    col_indices = vcat(vec(IW), vec(IE), vec(IS), vec(IN), vec(IT), vec(IB)) .+ 1
+    values = vcat(vec(Cx), vec(Cx), vec(Cy), vec(Cy), vec(Cz), vec(Cz))
+    A = sparse(row_indices, col_indices, values, Nod, Nod)
+
+    adiag = -vec(sum(A, dims=2))
+    A_diag = sparse(1:Nod, 1:Nod, adiag, Nod, Nod)
+    A_complete = A + A_diag
+
+    # Boundary conditions
+    FQ = zeros(sz)
+    FQ[3, 31, 26] = -1200.0 # Extraction
+
+    HI = zeros(sz) # Initial/Fixed heads are 0.0
+
+    # Right-hand side
+    RHS = vec(FQ) - A_complete[:, fxhd] * vec(HI)[fxhd]
+
+    # Solve
+    Phi = vec(HI)
+    Phi[active] = A_complete[active, active] \ RHS[active]
+    Phi[inact] .= NaN # Not strictly needed, but good for plotting
+
+    return vec(Phi), active, fxhd, inact
+end
+
+
+# ====================================================================
+#  STEP 2: YOUR GWFlow.jl SOLVER
+#  (This builds the identical model using your package's API)
+# ====================================================================
+
+function run_gwflow_solver(backend)
+    @info "Running GroundwaterFlow.jl solver..."
+
+    # --- 1. Grid Definition ---
+    nlay = 5
+    nrow = 80
+    ncol = 80
+    
+    delr = 25.0
+    delc = 25.0
+    top = 0.0
+    # Create layer thicknesses
+    layer_thicknesses = fill(20.0, nlay)
+    
+    grid = PlanarRegularGrid(
+        nlay, nrow, ncol;
+        delr = delr,
+        delc = delc,
+        top = top,
+        layer_thicknesses = layer_thicknesses,
+        origin = (-1000.0, -1000.0), # From x[1] and y[1]
+        angrot = 0.0
+    )
+
+    # --- 2. Properties ---
+    k_val = 10.0
+    T = Float64
+    
+    k_horiz_arr = KA.fill(backend, T(k_val), nlay, nrow, ncol)
+    k_vert_arr = KA.fill(backend, T(k_val), nlay, nrow, ncol)
+    
+    # Apply inactive zone by setting K=0
+    # Note: `KA.zeros` is the right way to do this
+    inactive_patch = KA.zeros(backend, T, nlay, 5, 50)
+    k_horiz_arr[:, 41:45, 21:70] = inactive_patch
+    k_vert_arr[:, 41:45, 21:70] = inactive_patch
+    
+    properties = (
+        k_horiz = k_horiz_arr,
+        k_vert = k_vert_arr
+    )
+
+    # --- 3. Boundary Conditions ---
+    
+    # Fixed Head (last row, head=0.0)
+    chb_locs = [(l, nrow, c) for l in 1:nlay, c in 1:ncol]
+    chb = ConstantHeadBC(grid, vec(chb_locs), T(0.0))
+    
+    # Well (Flux)
+    well = Well(grid, 3, 31, 26, T(-1200.0))
+    
+    conditions = (
+        fixed_head_N = chb,
+        extraction_well = well
+    )
+
+    # --- 4. Create Model ---
+    model = FlowModel(grid, properties, conditions)
+    
+    # --- 5. Build and Solve System ---
+    (A, b, chb_indices) = build_system(model, backend)
+    
+    prob = LinearProblem(A, b)
+    sol = solve(prob) # Use default sparse CPU solver
+    
+    return sol.u
+end
+
+
+# ====================================================================
+#  STEP 3: THE TESTSET
+# ====================================================================
+
+@testset "Olsthoorn (2021) Verification Test" begin
+    
+    # --- Run both solvers ---
+    phi_ref, active_nodes, fxhd_nodes, inact_nodes = run_reference_solver()
+    phi_gwflow = run_gwflow_solver(CPU())
+    
+    Nod = length(phi_ref)
+    
+    # --- Comparison ---
+    
+    @testset "Active Nodes" begin
+        # Compare the solution for all "active" (IBOUND > 0) nodes
+        @test phi_gwflow[active_nodes] ≈ phi_ref[active_nodes] atol = 1e-6
+    end
+    
+    @testset "Fixed Head Nodes" begin
+        # Compare the solution for all "fixed" (IBOUND < 0) nodes
+        # Both solutions should have 0.0 here
+        @test phi_gwflow[fxhd_nodes] ≈ phi_ref[fxhd_nodes] atol = 1e-6
+    end
+    
+    @testset "Inactive Nodes" begin
+        # Your new solver should solve for a head (which will be
+        # nonsensical), while the reference sets it to NaN.
+        # The important test is that the *active* nodes are correct.
+        # We can just check that the inactive nodes are NOT NaN
+        # in your solution (unless K=0 caused a singular matrix)
+        @test !any(isnan, phi_gwflow[inact_nodes])
+    end
+end
