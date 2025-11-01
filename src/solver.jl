@@ -67,10 +67,12 @@ end
     l, r, c = @index(Global, NTuple) # 3D thread index
     idx = _to_linear_index(grid, l, r, c) # Assuming this is GPU-safe
 
+    T = eltype(Cx)
+
     nlay, nrow, ncol = grid.nlay, grid.nrow, grid.ncol
-    
-    diag_val = 0.0
-    
+
+    diag_val = zero(T)
+
     if c > 1;   diag_val += Cx[l, r, c-1]; end
     if c < ncol; diag_val += Cx[l, r, c];   end
     if r > 1;   diag_val += Cy[l, r-1, c]; end
@@ -79,15 +81,15 @@ end
     if l < nlay; diag_val += Cz[l, r, c];   end
     
     # --- FIX FOR SINGULAR MATRIX ---
-    if diag_val == 0.0
+    if diag_val == zero(T)
         # This is an INACTIVE node (all K=0)
         # Set diagonal to 1.0 to make matrix non-singular.
-        A_diag[idx] = 1.0
-        b[idx] = 0.0
+        A_diag[idx] = NaN
+        b[idx] = NaN
     else
         # This is an ACTIVE node
         A_diag[idx] = -diag_val
-        b[idx] = 0.0
+        b[idx] = zero(T)
     end
 end
 
@@ -315,13 +317,12 @@ function build_system(model::FlowModel{<:PlanarRegularGrid}, backend)
     
     # --- 2. Launch Kernels ---
     k1 = compute_conductances_kernel!(backend)(
-        Cx, Cy, Cz, grid, 
-        model.properties.k_horiz, model.properties.k_vert; 
+        Cx, Cy, Cz, @Const(grid), 
+        @Const(model.properties.k_horiz), @Const(model.properties.k_vert); 
         ndrange=(nlay, nrow, ncol)
     )
-    synchronize(backend)
     k2 = build_diag_rhs_kernel!(backend)(
-        A_diag, b, Cx, Cy, Cz, grid; 
+        A_diag, b, @Const(Cx), @Const(Cy), @Const(Cz), @Const(grid);
         ndrange=(nlay, nrow, ncol)
     )
     
@@ -334,18 +335,16 @@ function build_system(model::FlowModel{<:PlanarRegularGrid}, backend)
         if bc isa FluxBC
             # Modifies `b` on device
             k_flux = apply_flux_kernel!(backend)(
-                b, bc.indices, bc.flux;
+                b, @Const(bc.indices), @Const(bc.flux);
                 ndrange=length(bc.indices)
             )
-            synchronize(backend)
             push!(events, k_flux)
         elseif bc isa GeneralHeadBC
             # Modifies `A_diag` and `b` on device
             k_ghb = apply_ghb_kernel!(backend)(
-                A_diag, b, bc.indices, bc.head, bc.conductance;
+                A_diag, b, @Const(bc.indices), @Const(bc.head), @Const(bc.conductance);
                 ndrange=length(bc.indices)
             )
-            synchronize(backend)
             push!(events, k_ghb)
         end
     end
