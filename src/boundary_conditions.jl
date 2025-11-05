@@ -1,5 +1,5 @@
 # --- 1. ABSTRACT TYPE ---
-abstract type BoundaryCondition{T<:AbstractFloat} end
+abstract type BoundaryCondition{T} end
 
 
 # --- 2. GENERIC STRUCT DEFINITIONS (for the solver) ---
@@ -9,7 +9,7 @@ ConstantHeadBC (Dirichlet)
 Applies a fixed head value to a set of nodes.
 """
 struct ConstantHeadBC{
-    T<:AbstractFloat,
+    T,
     IdxVec<:AbstractVector{Int},
     ValVec<:Union{T, AbstractVector{T}}
 } <: BoundaryCondition{T}
@@ -27,7 +27,7 @@ Applies a fixed flux (e..g, a well) to a set of nodes.
 Positive flux is injection, negative flux is extraction.
 """
 struct FluxBC{
-    T<:AbstractFloat,
+    T,
     IdxVec<:AbstractVector{Int},
     ValVec<:Union{T, AbstractVector{T}}
 } <: BoundaryCondition{T}
@@ -45,7 +45,7 @@ Connects nodes to an external head via a conductance.
 (e.g., river, lake, drain)
 """
 struct GeneralHeadBC{
-    T<:AbstractFloat,
+    T,
     IdxVec<:AbstractVector{Int},
     ValH<:Union{T, AbstractVector{T}},
     ValC<:Union{T, AbstractVector{T}}
@@ -115,9 +115,9 @@ Helper to prepare data (Float or Vector) for the BC struct,
 moving it to the correct device (CPU/GPU) to match the grid.
 """
 function _prepare_bc_data(
-    grid::PlanarRegularGrid{T},
-    data::Union{<:Real, AbstractVector{<:Real}}
-) where T
+    grid::PlanarRegularGrid{K},
+    data::Union{T, AbstractVector{T}}
+) where {K,T}
     
     # Get the grid's array type (e.g. Vector or CuArray)
     ArrayType = typeof(grid.delr)
@@ -214,19 +214,19 @@ Creates a constant head boundary condition over one or more cells.
 function ConstantHeadBC(
     grid::PlanarRegularGrid,
     locations::AbstractVector{<:Tuple{Int, Int, Int}},
-    head::Union{<:Real, AbstractVector{<:Real}}
-)
-    
+    head::Union{T, AbstractVector{T}}
+) where {T}
+
     # 1. Convert (l, r, c) tuples to linear indices
     indices_vec = _to_linear_indices(grid, locations)
     
     # 2. Prepare head data (move to GPU if needed)
     head_data = _prepare_bc_data(grid, head)
 
-    T = eltype(head_data)
+    #T = eltype(head_data)
 
     # 3. Return the generic ConstantHeadBC struct
-    return ConstantHeadBC{T, typeof(indices_vec), typeof(head_data)}(indices_vec, head_data)
+    return ConstantHeadBC(indices_vec, head_data)
 end
 
 

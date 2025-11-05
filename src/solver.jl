@@ -19,7 +19,8 @@ end
     return Area * (K1*K2) / (K2*L1 + K1*L2)
 end
 
-@kernel function compute_conductances_kernel!(Cx, Cy, Cz, grid, k_horiz, k_vert)
+@kernel function compute_conductances_kernel!(Cx, Cy, Cz, 
+    @Const(grid), @Const(k_horiz), @Const(k_vert))
     l, r, c = @index(Global, NTuple)
     nlay, nrow, ncol = grid.nlay, grid.nrow, grid.ncol
 
@@ -61,8 +62,8 @@ end
 
 @kernel function build_diag_rhs_kernel!(
     A_diag, b,
-    Cx, Cy, Cz,
-    grid
+    @Const(Cx), @Const(Cy), @Const(Cz),
+    @Const(grid)
 )
     l, r, c = @index(Global, NTuple) # 3D thread index
     idx = _to_linear_index(grid, l, r, c) # Assuming this is GPU-safe
@@ -93,7 +94,8 @@ end
     end
 end
 
-@kernel function apply_ghb_kernel!(A_diag, b, indices, heads, conds)
+@kernel function apply_ghb_kernel!(A_diag, b,
+     @Const(indices), @Const(heads), @Const(conds))
     i = @index(Global, Linear) # 1D thread index
     
     idx = indices[i]
@@ -107,7 +109,7 @@ end
     Atomix.@atomic b[idx] += C * h
 end
 
-@kernel function apply_flux_kernel!(b, indices, fluxes)
+@kernel function apply_flux_kernel!(b, @Const(indices), @Const(fluxes))
     i = @index(Global, Linear)
     idx = indices[i]
     Q = (fluxes isa AbstractVector) ? fluxes[i] : fluxes
@@ -317,12 +319,12 @@ function build_system(model::FlowModel{<:PlanarRegularGrid}, backend)
     
     # --- 2. Launch Kernels ---
     k1 = compute_conductances_kernel!(backend)(
-        Cx, Cy, Cz, @Const(grid), 
-        @Const(model.properties.k_horiz), @Const(model.properties.k_vert); 
+        Cx, Cy, Cz, grid, 
+        model.properties.k_horiz, model.properties.k_vert;
         ndrange=(nlay, nrow, ncol)
     )
     k2 = build_diag_rhs_kernel!(backend)(
-        A_diag, b, @Const(Cx), @Const(Cy), @Const(Cz), @Const(grid);
+        A_diag, b, Cx, Cy, Cz, grid;
         ndrange=(nlay, nrow, ncol)
     )
     
@@ -335,14 +337,14 @@ function build_system(model::FlowModel{<:PlanarRegularGrid}, backend)
         if bc isa FluxBC
             # Modifies `b` on device
             k_flux = apply_flux_kernel!(backend)(
-                b, @Const(bc.indices), @Const(bc.flux);
+                b, bc.indices, bc.flux;
                 ndrange=length(bc.indices)
             )
             push!(events, k_flux)
         elseif bc isa GeneralHeadBC
             # Modifies `A_diag` and `b` on device
             k_ghb = apply_ghb_kernel!(backend)(
-                A_diag, b, @Const(bc.indices), @Const(bc.head), @Const(bc.conductance);
+                A_diag, b, bc.indices, bc.head, bc.conductance;
                 ndrange=length(bc.indices)
             )
             push!(events, k_ghb)
