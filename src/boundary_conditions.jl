@@ -61,22 +61,66 @@ struct GeneralHeadBC{
     conductance::ValC
 end
 
+"""
+RiverBC (Robin / Mixed / Nonlinear)
+Non linear river boundary condition that accounts when aquifer heads are below aquifer bottom.
+(e.g., river)
+"""
+struct RiverBC{
+    T,
+    IdxVec<:AbstractVector{Int},
+    ValH<:Union{T, AbstractVector{T}},
+    ValC<:Union{T, AbstractVector{T}},
+    ValB<:Union{T, AbstractVector{T}},
+} <: BoundaryCondition{T}
+    
+    "Linear indices of the nodes"
+    indices::IdxVec
+    
+    "External stage (can be a single value or an array)"
+    stage::ValH
+    
+    "Conductance from the node to the external head (can be single or array)"
+    conductance::ValC
+
+    "River bed height"
+    bottom::ValB
+end
+
+"""
+DrainBC (Robin / Mixed / Nonlinear)
+Non linear drain boundary condition that
+only withdraw water when aquifer heads are above drain height.
+(e.g., streams, springs, drainage pipes)
+"""
+struct DrainBC{
+    T,
+    IdxVec<:AbstractVector{Int},
+    ValH<:Union{T, AbstractVector{T}},
+    ValC<:Union{T, AbstractVector{T}},
+} <: BoundaryCondition{T}
+    
+    "Linear indices of the nodes"
+    indices::IdxVec
+    
+    "External stage (can be a single value or an array)"
+    stage::ValH
+    
+    "Conductance from the node to the external head (can be single or array)"
+    conductance::ValC
+end
+
+
+
 
 # --- 3. INTERNAL HELPER FUNCTIONS ---
 
 """
 Converts a 3D (layer, row, col) index to a 1D linear index.
-Assumes array storage is (nlay, nrow, ncol).
+Wraps the grid's canonical indexing method.
 """
 function _to_linear_index(grid::PlanarRegularGrid, l::Int, r::Int, c::Int)
-    # Perform bounds checking
-    if !(1 <= l <= grid.nlay && 1 <= r <= grid.nrow && 1 <= c <= grid.ncol)
-        error("Grid index ($l, $r, $c) is out of bounds for grid size ($grid.nlay, $grid.nrow, $grid.ncol)")
-    end
-    
-    # Calculate linear index for A[l, r, c]
-    linear_idx = (c - 1) * grid.nrow * grid.nlay + (r - 1) * grid.nlay + l
-    return linear_idx
+    return GWGrids.get_linear_index(grid, l, r, c)
 end
 
 """
@@ -87,7 +131,6 @@ function _to_linear_indices(
     grid::PlanarRegularGrid, 
     locations::AbstractVector{<:Tuple{Int, Int, Int}}
 )
-    n_nodes = length(locations)
     n_nodes = length(locations)
 
     # Create an output container with the same device/container type as grid.delr
@@ -176,7 +219,6 @@ end
     FluxBC(grid, locations, flux)
 
 Creates a flux boundary condition (e.g., regional flow) over one or more cells.
-
 # Arguments
 - `grid::PlanarRegularGrid`: The grid object.
 - `locations::AbstractVector{<:Tuple{Int, Int, Int}}`: A list of `(l, r, c)` tuples.
@@ -231,6 +273,34 @@ end
 
 
 """
+    GeneralHeadBC(grid, locations, head, conductance)
+
+Creates a General Head Boundary (GHB) condition.
+Flow is calculated as \$Q = C (h_{ext} - h_{aquifer})\$.
+
+# Arguments
+- `grid::PlanarRegularGrid`: The grid object.
+- `locations::AbstractVector{<:Tuple{Int, Int, Int}}`: List of `(l, r, c)` tuples.
+- `head::Union{T, AbstractVector{T}}`: The external head (L).
+- `conductance::Union{T, AbstractVector{T}}`: The conductance (L²/T).
+"""
+function GeneralHeadBC(grid::PlanarRegularGrid,
+    locations::AbstractVector{<:Tuple{Int, Int, Int}},
+    head::Union{<:Real, AbstractVector{<:Real}},
+    conductance::Union{<:Real, AbstractVector{<:Real}}
+    )
+    # 1. Convert (l, r, c) tuples to linear indices
+    indices_vec = _to_linear_indices(grid, locations)
+    
+    # 2. Prepare data
+    stage_data = _prepare_bc_data(grid, head)
+    cond_data = _prepare_bc_data(grid, conductance)
+    
+    # 3. Return the generic GeneralHeadBC struct
+    return GeneralHeadBC(indices_vec, stage_data, cond_data)
+end
+
+"""
     RiverBC(grid, locations, stage, conductance)
 
 Creates a linear River boundary condition (a form of General Head Boundary).
@@ -248,6 +318,7 @@ function RiverBC(
     grid::PlanarRegularGrid,
     locations::AbstractVector{<:Tuple{Int, Int, Int}},
     stage::Union{<:Real, AbstractVector{<:Real}},
+    bottom::Union{<:Real, AbstractVector{<:Real}},
     conductance::Union{<:Real, AbstractVector{<:Real}}
 )
     
@@ -257,7 +328,74 @@ function RiverBC(
     # 2. Prepare data
     stage_data = _prepare_bc_data(grid, stage)
     cond_data = _prepare_bc_data(grid, conductance)
+    bottom_data = _prepare_bc_data(grid, bottom)
     
-    # 3. Return the generic GeneralHeadBC struct
-    return GeneralHeadBC(indices_vec, stage_data, cond_data)
+    # 3. Return the RiverBC struct
+    return RiverBC(indices_vec, stage_data, cond_data, bottom_data)
 end
+
+"""
+    RechargeBC(grid, locations, recharge_rate)
+
+Applies areal recharge to the top layer of the model.
+Automatically converts the recharge rate (L/T) to a volumetric flux (L³/T)
+based on the cell area.
+
+# Arguments
+- `grid::PlanarRegularGrid`: The grid object.
+- `locations::AbstractVector{<:Tuple{Int, Int}}`: List of `(row, col)` tuples (2D coordinates).
+- `recharge_rate::Union{T, AbstractVector{T}}`: The recharge rate (L/T).
+  Positive values indicate water entering the aquifer.
+"""
+function RechargeBC(
+    grid::PlanarRegularGrid,
+    locations::AbstractVector{<:Tuple{Int, Int}},
+    recharge_rate::Union{<:Real, AbstractVector{<:Real}}
+)
+    # 1. Convert (r, c) tuples to (1, r, c) linear indices 
+    up_locations = [(1, r, c) for (r,c) in locations]
+    indices_vec = _to_linear_indices(grid, up_locations)
+    
+    areas = [grid.delr[c]*grid.delc[r] for (r,c) in locations]
+    flux = recharge_rate.*areas
+    # 2. Prepare flux data (move to GPU if needed)
+    flux_data = _prepare_bc_data(grid, flux)
+
+    # 3. Return the generic FluxBC struct
+    return FluxBC(indices_vec, flux_data)
+end
+
+"""
+    DrainBC(grid, locations, stage, conductance)
+
+Creates a Drain boundary condition.
+Acts like a General Head Boundary but only extracts water when \$h_{aquifer} > h_{stage}\$.
+
+# Arguments
+- `grid::PlanarRegularGrid`: The grid object.
+- `locations::AbstractVector{<:Tuple{Int, Int, Int}}`: List of `(l, r, c)` tuples.
+- `stage::Union{T, AbstractVector{T}}`: The drain elevation/stage (L).
+- `conductance::Union{T, AbstractVector{T}}`: The drain conductance (L²/T).
+"""
+function DrainBC(grid::PlanarRegularGrid,
+    locations::AbstractVector{<:Tuple{Int, Int, Int}},
+    stage::Union{<:Real, AbstractVector{<:Real}},
+    conductance::Union{<:Real, AbstractVector{<:Real}}
+    )
+    # 1. Convert (l, r, c) tuples to linear indices
+    indices_vec = _to_linear_indices(grid, locations)
+    
+    # 2. Prepare data
+    stage_data = _prepare_bc_data(grid, stage)
+    cond_data = _prepare_bc_data(grid, conductance)
+    
+    # 3. Return the DrainBC struct
+    return DrainBC(indices_vec, stage_data, cond_data)
+end
+
+@inline function bc_priority(::FluxBC) 1 end
+@inline function bc_priority(::GeneralHeadBC) 1 end
+@inline function bc_priority(::ConstantHeadBC) 1 end
+@inline function bc_priority(::RiverBC) 1 end
+@inline function bc_priority(::DrainBC) 1 end
+Base.isless(a::BoundaryCondition, b::BoundaryCondition) = bc_priority(a) < bc_priority(b)
