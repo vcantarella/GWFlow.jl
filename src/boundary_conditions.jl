@@ -11,7 +11,7 @@ Applies a fixed head value to a set of nodes.
 struct ConstantHeadBC{
     T,
     IdxVec<:AbstractVector{Int},
-    ValVec<:Union{T, AbstractVector{T}}
+    ValVec<:AbstractVector{T}
 } <: BoundaryCondition{T}
     
     "Linear indices of the nodes"
@@ -29,7 +29,7 @@ Positive flux is injection, negative flux is extraction.
 struct FluxBC{
     T,
     IdxVec<:AbstractVector{Int},
-    ValVec<:Union{T, AbstractVector{T}}
+    ValVec<:AbstractVector{T}
 } <: BoundaryCondition{T}
     
     "Linear indices of the nodes"
@@ -47,8 +47,8 @@ Connects nodes to an external head via a conductance.
 struct GeneralHeadBC{
     T,
     IdxVec<:AbstractVector{Int},
-    ValH<:Union{T, AbstractVector{T}},
-    ValC<:Union{T, AbstractVector{T}}
+    ValH<:AbstractVector{T},
+    ValC<:AbstractVector{T}
 } <: BoundaryCondition{T}
     
     "Linear indices of the nodes"
@@ -69,9 +69,9 @@ Non linear river boundary condition that accounts when aquifer heads are below a
 struct RiverBC{
     T,
     IdxVec<:AbstractVector{Int},
-    ValH<:Union{T, AbstractVector{T}},
-    ValC<:Union{T, AbstractVector{T}},
-    ValB<:Union{T, AbstractVector{T}},
+    ValH<:AbstractVector{T},
+    ValC<:AbstractVector{T},
+    ValB<:AbstractVector{T},
 } <: BoundaryCondition{T}
     
     "Linear indices of the nodes"
@@ -96,8 +96,8 @@ only withdraw water when aquifer heads are above drain height.
 struct DrainBC{
     T,
     IdxVec<:AbstractVector{Int},
-    ValH<:Union{T, AbstractVector{T}},
-    ValC<:Union{T, AbstractVector{T}},
+    ValH<:AbstractVector{T},
+    ValC<:AbstractVector{T},
 } <: BoundaryCondition{T}
     
     "Linear indices of the nodes"
@@ -110,7 +110,27 @@ struct DrainBC{
     conductance::ValC
 end
 
+struct EvapotranspirationBC{
+    T,
+    IdxVec<:AbstractVector{Int},
+    ValS<:AbstractVector{T},
+    ValD<:AbstractVector{T},
+    ValE<:AbstractVector{T},
+} <: BoundaryCondition{T}
+    
+    "Linear indices of the nodes"
+    indices::IdxVec
+    
+    "Surface (evaporation surface)"
+    surface::ValS
 
+    "Extincion depth"
+    ext_depth::ValD
+
+    "Evapotranspiration rate"
+    evt::ValE
+    
+end
 
 
 # --- 3. INTERNAL HELPER FUNCTIONS ---
@@ -159,7 +179,8 @@ moving it to the correct device (CPU/GPU) to match the grid.
 """
 function _prepare_bc_data(
     grid::PlanarRegularGrid{K},
-    data::Union{T, AbstractVector{T}}
+    data::Union{T, AbstractVector{T}},
+    id_vec::AbstractVector
 ) where {K,T}
     
     # Get the grid's array type (e.g. Vector or CuArray)
@@ -169,8 +190,8 @@ function _prepare_bc_data(
         # If it's a vector, ensure it's the correct ArrayType
         ArrayType(T.(data))
     else
-        # It's a single value, just convert type
-        T(data)
+        # It's a single value, we need to repeat and match the locations vec
+        ArrayType(repeat([T(data)],length(id_vec)))
     end
 end
 
@@ -203,7 +224,7 @@ function Well(
     indices_vec[1] = idx
 
     # 3. Prepare the flux value on the correct device/type
-    flux_val = _prepare_bc_data(grid, Q)
+    flux_val = _prepare_bc_data(grid, Q, indices_vec)
 
     # 4. Return the generic FluxBC struct with explicit type parameters
     FT = eltype(flux_val)
@@ -235,7 +256,7 @@ function FluxBC(
     indices_vec = _to_linear_indices(grid, locations)
     
     # 2. Prepare flux data (move to GPU if needed)
-    flux_data = _prepare_bc_data(grid, flux)
+    flux_data = _prepare_bc_data(grid, flux, indices_vec)
 
     # 3. Return the generic FluxBC struct
     return FluxBC(indices_vec, flux_data)
@@ -263,7 +284,7 @@ function ConstantHeadBC(
     indices_vec = _to_linear_indices(grid, locations)
     
     # 2. Prepare head data (move to GPU if needed)
-    head_data = _prepare_bc_data(grid, head)
+    head_data = _prepare_bc_data(grid, head, indices_vec)
 
     #T = eltype(head_data)
 
@@ -293,8 +314,8 @@ function GeneralHeadBC(grid::PlanarRegularGrid,
     indices_vec = _to_linear_indices(grid, locations)
     
     # 2. Prepare data
-    stage_data = _prepare_bc_data(grid, head)
-    cond_data = _prepare_bc_data(grid, conductance)
+    stage_data = _prepare_bc_data(grid, head, indices_vec)
+    cond_data = _prepare_bc_data(grid, conductance, indices_vec)
     
     # 3. Return the generic GeneralHeadBC struct
     return GeneralHeadBC(indices_vec, stage_data, cond_data)
@@ -326,9 +347,9 @@ function RiverBC(
     indices_vec = _to_linear_indices(grid, locations)
     
     # 2. Prepare data
-    stage_data = _prepare_bc_data(grid, stage)
-    cond_data = _prepare_bc_data(grid, conductance)
-    bottom_data = _prepare_bc_data(grid, bottom)
+    stage_data = _prepare_bc_data(grid, stage, indices_vec)
+    cond_data = _prepare_bc_data(grid, conductance, indices_vec)
+    bottom_data = _prepare_bc_data(grid, bottom, indices_vec)
     
     # 3. Return the RiverBC struct
     return RiverBC(indices_vec, stage_data, cond_data, bottom_data)
@@ -359,7 +380,7 @@ function RechargeBC(
     areas = [grid.delr[c]*grid.delc[r] for (r,c) in locations]
     flux = recharge_rate.*areas
     # 2. Prepare flux data (move to GPU if needed)
-    flux_data = _prepare_bc_data(grid, flux)
+    flux_data = _prepare_bc_data(grid, flux, indices_vec)
 
     # 3. Return the generic FluxBC struct
     return FluxBC(indices_vec, flux_data)
@@ -386,11 +407,28 @@ function DrainBC(grid::PlanarRegularGrid,
     indices_vec = _to_linear_indices(grid, locations)
     
     # 2. Prepare data
-    stage_data = _prepare_bc_data(grid, stage)
-    cond_data = _prepare_bc_data(grid, conductance)
+    stage_data = _prepare_bc_data(grid, stage, indices_vec)
+    cond_data = _prepare_bc_data(grid, conductance, indices_vec)
     
     # 3. Return the DrainBC struct
     return DrainBC(indices_vec, stage_data, cond_data)
+end
+
+function EvapotranspirationBC(grid::PlanarRegularGrid,
+    locations::AbstractVector{<:Tuple{Int, Int, Int}},
+    surface::Union{<:Real, AbstractVector{<:Real}},
+    ext_depth::Union{<:Real, AbstractVector{<:Real}},
+    evt::Union{<:Real, AbstractVector{<:Real}}
+    )
+    # 1. Convert (l, r, c) tuples to linear indices
+    indices_vec = _to_linear_indices(grid, locations)
+    
+    # 2. Prepare data
+    surface_data = _prepare_bc_data(grid, surface, indices_vec)
+    ext_depth_data = _prepare_bc_data(grid, ext_depth, indices_vec)
+    evt_data = _prepare_bc_data(grid, evt, indices_vec)
+    # 3. Return the DrainBC struct
+    return EvapotranspirationBC(indices_vec, surface_data, ext_depth_data, evt_data)
 end
 
 @inline function bc_priority(::FluxBC) 1 end
@@ -398,4 +436,5 @@ end
 @inline function bc_priority(::ConstantHeadBC) 1 end
 @inline function bc_priority(::RiverBC) 1 end
 @inline function bc_priority(::DrainBC) 1 end
+@inline function bc_priority(::EvapotranspirationBC) 1 end
 Base.isless(a::BoundaryCondition, b::BoundaryCondition) = bc_priority(a) < bc_priority(b)

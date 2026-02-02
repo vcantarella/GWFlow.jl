@@ -135,7 +135,7 @@ function run_gwflow_solver_v2(backend)
     # calls `K2 = _get_k(l, r, c+1, p)` for X flux. This implies K is isotropic or scalar per cell.
     # We will return the horizontal K.
     
-    _get_k = (l, r, c, p) -> begin
+    _get_k = (l, r, c, p, n) -> begin
         # Bounds check handled by caller or array indexing
         return k_horiz_arr[l, r, c]
     end
